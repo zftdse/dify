@@ -1,16 +1,10 @@
 import type { MemberInviteResponse } from '@dify/contracts/api/console/workspaces/types.gen'
-import { zGetFeaturesResponse } from '@dify/contracts/api/console/features/zod.gen'
-import { QueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
 import { userEvent } from 'vite-plus/test/browser'
 import { render } from 'vitest-browser-react'
-import { systemFeaturesQueryOptions } from '@/features/system-features/client'
-import { consoleQuery } from '@/service/console'
-import { seedCurrentWorkspaceQuery } from '@/test/console/current-workspace'
+import { commonQueryKeys } from '@/service/use-common'
+import { createConsoleQueryWrapper } from '@/test/console/query-data'
 import { QueryClientTestProvider } from '@/test/console/query-provider'
-import { createSystemFeaturesFixture } from '@/test/console/system-features'
-import InvitedModal from '../../invited-modal'
-import { InviteModal } from '../index'
+import MembersPage from '../../index'
 
 const { inviteMember } = vi.hoisted(() => ({ inviteMember: vi.fn() }))
 vi.mock('#i18n', () => ({ useLocale: () => 'en-US' }))
@@ -24,64 +18,36 @@ vi.mock('@/service/access-control/use-workspace-roles', () => ({
     fetchNextPage: vi.fn(),
   }),
 }))
-vi.mock('@/service/console', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/service/console')>()
-  return {
-    ...actual,
-    consoleQuery: new Proxy(actual.consoleQuery, {
-      get(target, key) {
-        if (key !== 'workspaces') return Reflect.get(target, key)
-        return {
-          current: {
-            summary: target.workspaces.current.summary,
-            members: {
-              inviteEmail: {
-                post: {
-                  mutationOptions: (
-                    options: Parameters<
-                      typeof actual.consoleQuery.workspaces.current.members.inviteEmail.post.mutationOptions
-                    >[0],
-                  ) => ({ ...options, mutationFn: inviteMember }),
-                },
-              },
-            },
-          },
-        }
-      },
-    }),
-  }
-})
-
-function InvitationFlow() {
-  const [results, setResults] = useState<MemberInviteResponse['invitation_results'] | null>(null)
-  return (
-    <>
-      <InviteModal isEmailSetup onSend={setResults} />
-      {results && <InvitedModal invitationResults={results} onCancel={() => setResults(null)} />}
-    </>
-  )
+function createMembersPageQueryClient() {
+  const { queryClient } = createConsoleQueryWrapper({
+    systemFeatures: { deployment_edition: 'CLOUD', is_email_setup: true },
+    workspacePermissionKeys: ['workspace.member.manage'],
+    features: { workspace_members: { enabled: true, size: 1, limit: 10 } },
+  })
+  queryClient.setQueryData([...commonQueryKeys.members, 'en'], { accounts: [] })
+  return queryClient
 }
+
+beforeEach(() => {
+  vi.stubGlobal('BASE_UI_ANIMATIONS_DISABLED', false)
+  inviteMember.mockReset()
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (!url.pathname.endsWith('/workspaces/current/members/invite-email'))
+        throw new Error(`Unexpected request: ${url.pathname}`)
+      return Response.json(await inviteMember())
+    }),
+  )
+})
 
 afterEach(() => vi.unstubAllGlobals())
 
 it.each(['click', 'Enter'] as const)(
   'holds focus through %s submission and refresh, transfers it to results and returns it to Invite',
   async (submission) => {
-    vi.stubGlobal('BASE_UI_ANIMATIONS_DISABLED', false)
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { staleTime: Infinity, retry: false } },
-    })
-    seedCurrentWorkspaceQuery(queryClient)
-    queryClient.setQueryData(
-      systemFeaturesQueryOptions().queryKey,
-      createSystemFeaturesFixture({ deployment_edition: 'CLOUD' }),
-    )
-    queryClient.setQueryData(
-      consoleQuery.features.get.queryKey(),
-      zGetFeaturesResponse.parse({
-        workspace_members: { enabled: true, size: 1, limit: 10 },
-      }),
-    )
+    const queryClient = createMembersPageQueryClient()
     let resolveInvite!: (value: MemberInviteResponse) => void
     inviteMember.mockReturnValue(
       new Promise<MemberInviteResponse>((resolve) => {
@@ -94,7 +60,7 @@ it.each(['click', 'Enter'] as const)(
       .mockImplementation(() => new Promise<void>((resolve) => refreshes.push(resolve)))
     const screen = await render(
       <QueryClientTestProvider queryClient={queryClient}>
-        <InvitationFlow />
+        <MembersPage />
       </QueryClientTestProvider>,
     )
     const trigger = screen.getByRole('button', { name: /members\.invite$/ })
@@ -125,16 +91,80 @@ it.each(['click', 'Enter'] as const)(
       .element(screen.getByRole('dialog', { name: /members\.inviteTeamMember$/ }))
       .toBeVisible()
     await expect.element(screen.getByRole('button', { name: /operation\.close/ })).toBeDisabled()
-    resolveInvite({ result: 'success', tenant_id: 'tenant-id', invitation_results: [] })
+    resolveInvite({
+      result: 'success',
+      tenant_id: 'tenant-id',
+      invitation_results: [
+        { email: 'person@example.com', status: 'already_member', message: 'Already a member' },
+      ],
+    })
     await expect.poll(() => invalidate.mock.calls.length).toBe(2)
     await userEvent.keyboard('{Escape}')
     await expect.element(submit).toHaveFocus()
     refreshes.forEach((resolve) => resolve())
-    const result = screen.getByRole('dialog', { name: /members\.invitationSent$/ })
+    const result = screen.getByRole('dialog', { name: /members\.noNewInvitationsSent$/ })
     await expect.element(result).toBeVisible()
     await expect.element(result.getByRole('button', { name: /operation\.close/ })).toHaveFocus()
-    await result.getByRole('button', { name: /members\.ok$/ }).click()
+    await expect.element(result.getByText('person@example.com')).toBeVisible()
+    const popup = result.element()
+    await expect.poll(() => getComputedStyle(popup).opacity).toBe('1')
+    const exitContent = new Promise<boolean>((resolve) => {
+      const onTransition = (event: Event) => {
+        if (event.target !== popup || (event as TransitionEvent).propertyName !== 'opacity') return
+        popup.removeEventListener('transitionrun', onTransition)
+        resolve(popup.textContent?.includes('person@example.com') ?? false)
+      }
+      popup.addEventListener('transitionrun', onTransition)
+    })
+    if (submission === 'click') await result.getByRole('button', { name: /members\.ok$/ }).click()
+    else await userEvent.keyboard('{Escape}')
+    expect(await exitContent).toBe(true)
     await expect.element(result).not.toBeInTheDocument()
+    await expect.element(trigger).toHaveFocus()
+    await expect.element(screen.getByText('person@example.com')).not.toBeInTheDocument()
+    await userEvent.keyboard('{Enter}')
+    await expect.element(input).toHaveValue('')
+    await expect.element(result).not.toBeInTheDocument()
+    await screen
+      .getByRole('dialog', { name: /members\.inviteTeamMember$/ })
+      .getByRole('button', { name: /operation\.close/ })
+      .click()
     await expect.element(trigger).toHaveFocus()
   },
 )
+
+it('opens workspace editing from the real keyboard entry and retains the canceled draft through exit', async () => {
+  const queryClient = createMembersPageQueryClient()
+  const screen = await render(
+    <QueryClientTestProvider queryClient={queryClient}>
+      <MembersPage />
+    </QueryClientTestProvider>,
+  )
+  const trigger = screen.getByRole('button', { name: /account\.editWorkspaceInfo$/ })
+  await userEvent.tab()
+  await expect.element(trigger).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  const dialog = screen.getByRole('dialog', { name: /account\.editWorkspaceInfo$/ })
+  const input = dialog.getByRole('textbox', { name: /account\.workspaceName$/ })
+  await expect.element(input).toHaveValue('Workspace')
+  await input.fill('Canceled workspace name')
+  const popup = dialog.element()
+  await expect.poll(() => getComputedStyle(popup).opacity).toBe('1')
+  const exitDraft = new Promise<string>((resolve) => {
+    const onTransition = (event: Event) => {
+      if (event.target !== popup || (event as TransitionEvent).propertyName !== 'opacity') return
+      popup.removeEventListener('transitionrun', onTransition)
+      resolve((input.element() as HTMLInputElement).value)
+    }
+    popup.addEventListener('transitionrun', onTransition)
+  })
+  await dialog.getByRole('button', { name: /operation\.cancel$/ }).click()
+  expect(await exitDraft).toBe('Canceled workspace name')
+  await expect.element(dialog).not.toBeInTheDocument()
+  await expect.element(trigger).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect.element(input).toHaveValue('Workspace')
+  await userEvent.keyboard('{Escape}')
+  await expect.element(dialog).not.toBeInTheDocument()
+  await expect.element(trigger).toHaveFocus()
+})
