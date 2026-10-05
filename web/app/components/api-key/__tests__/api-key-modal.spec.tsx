@@ -3,7 +3,7 @@ import type { ApiKeyList as DatasetApiKeyList } from '@dify/contracts/api/consol
 import type { EnvironmentApiKey } from '@dify/contracts/enterprise-app-deploy/types.gen'
 import type { ComponentProps } from 'react'
 import { QueryClientProvider, skipToken } from '@tanstack/react-query'
-import { act, screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach } from 'vite-plus/test'
 import { render } from '@/test/console/render'
@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   appKeys: [] as AppApiKeyList['data'],
   datasetKeys: [] as DatasetApiKeyList['data'],
   environmentKeys: [] as EnvironmentApiKey[],
+  knowledgeBases: vi.fn(),
   listApp: vi.fn(),
   createApp: vi.fn(),
   deleteApp: vi.fn(),
@@ -23,6 +24,10 @@ const apiMocks = vi.hoisted(() => ({
   listEnvironment: vi.fn(),
   createEnvironment: vi.fn(),
   deleteEnvironment: vi.fn(),
+}))
+
+vi.mock('@/service/base', () => ({
+  get: (url: string) => apiMocks.knowledgeBases(url),
 }))
 
 vi.mock('@/service/console', () => ({
@@ -140,6 +145,14 @@ const environmentScope = {
   environmentId: 'staging',
 } as const
 
+function createPendingRequest<T>() {
+  let reject!: (reason: Error) => void
+  const promise = new Promise<T>((_resolve, rejectPromise) => {
+    reject = rejectPromise
+  })
+  return { promise, reject }
+}
+
 async function renderModal(
   scope: ComponentProps<typeof ApiKeyModal>['scope'],
   overrides: { canManage?: boolean } = {},
@@ -164,7 +177,7 @@ async function renderModal(
 
 async function confirmKeyDeletion(accessibleName: string) {
   const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
-  const deleteButton = screen.getByRole('button', { name: accessibleName })
+  const deleteButton = await screen.findByRole('button', { name: accessibleName })
   await user.click(deleteButton)
   await act(async () => {
     vi.runAllTimers()
@@ -180,6 +193,13 @@ describe('ApiKeyModal', () => {
     apiMocks.appKeys = []
     apiMocks.datasetKeys = []
     apiMocks.environmentKeys = []
+    apiMocks.knowledgeBases.mockResolvedValue({
+      data: [{ id: 'kb-1', name: 'Product guide' }],
+      page: 1,
+      has_more: false,
+      total: 1,
+      limit: 20,
+    })
     apiMocks.createApp.mockResolvedValue({ token: 'new-app-token-123' })
     apiMocks.deleteApp.mockResolvedValue(undefined)
     apiMocks.createDataset.mockResolvedValue({ token: 'new-dataset-token-123' })
@@ -409,5 +429,152 @@ describe('ApiKeyModal', () => {
     await user.click(screen.getByRole('button', { name: 'common.operation.close' }))
 
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+  it('blocks dismissal and duplicate creation while pending, then allows retry after failure', async () => {
+    apiMocks.appKeys = [
+      { id: 'app-key-1', token: 'app-secret-token-123456789', type: 'app', created_at: 1 },
+    ]
+    const pending = createPendingRequest<{ token: string }>()
+    apiMocks.createApp.mockReturnValueOnce(pending.promise)
+    const { onOpenChange } = await renderModal(appScope)
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const create = screen.getByRole('button', { name: 'appApi.apiKeyModal.createNewSecretKey' })
+    await user.click(create)
+    await waitFor(() => expect(create).toHaveAttribute('aria-disabled', 'true'))
+    expect(screen.getByRole('button', { name: 'common.operation.close' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /common.operation.delete/ })).toBeDisabled()
+    await user.keyboard('{Escape}')
+    await user.click(create)
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(apiMocks.createApp).toHaveBeenCalledTimes(1)
+    await act(async () => pending.reject(new Error('Creation failed')))
+    await waitFor(() => expect(create).not.toHaveAttribute('aria-disabled', 'true'))
+    await user.click(create)
+    expect(
+      await screen.findByRole('textbox', { name: 'appApi.apiKeyModal.secretKey' }),
+    ).toHaveValue('new-app-token-123')
+    expect(apiMocks.createApp).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps deletion confirmation pending and failed, and closes it only after successful retry', async () => {
+    apiMocks.appKeys = [
+      { id: 'app-key-1', token: 'app-secret-token-123456789', type: 'app', created_at: 1 },
+    ]
+    const pending = createPendingRequest<void>()
+    apiMocks.deleteApp.mockReturnValueOnce(pending.promise)
+    const { onOpenChange } = await renderModal(appScope)
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const deleteButton = await screen.findByRole('button', {
+      name: 'common.operation.delete app...cret-token-123456789',
+    })
+    await user.click(deleteButton)
+    await user.click(screen.getByRole('button', { name: 'common.operation.cancel' }))
+    await waitFor(() => expect(deleteButton).toHaveFocus())
+    await confirmKeyDeletion('common.operation.delete app...cret-token-123456789')
+    const confirmation = screen.getByRole('alertdialog')
+    const confirm = within(confirmation).getByRole('button', { name: 'common.operation.confirm' })
+    await waitFor(() => expect(confirm).toHaveAttribute('aria-disabled', 'true'))
+    expect(
+      within(confirmation).getByRole('button', { name: 'common.operation.cancel' }),
+    ).toBeDisabled()
+    await user.keyboard('{Escape}')
+    await user.click(confirm)
+    expect(confirmation).toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(apiMocks.deleteApp).toHaveBeenCalledTimes(1)
+    await act(async () => pending.reject(new Error('Deletion failed')))
+    await waitFor(() => expect(confirm).not.toHaveAttribute('aria-disabled', 'true'))
+    await user.click(confirm)
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(apiMocks.deleteApp).toHaveBeenCalledTimes(2)
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', {
+          name: 'appApi.apiKeyModal.createNewSecretKey',
+        }),
+      ).toHaveFocus(),
+    )
+  })
+
+  it('loads knowledge bases only from the open picker and resets selection after cancellation', async () => {
+    await renderModal(datasetScope)
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const openScope = screen.getByRole('button', { name: 'appApi.apiKeyModal.createNewSecretKey' })
+    expect(apiMocks.knowledgeBases).not.toHaveBeenCalled()
+    await user.click(openScope)
+    const scope = screen.getByRole('dialog', { name: 'appApi.apiKeyModal.addTitle' })
+    await user.click(within(scope).getByRole('radio', { name: /scopeSpecificDatasets/ }))
+    expect(apiMocks.knowledgeBases).not.toHaveBeenCalled()
+    await user.click(
+      within(scope).getByRole('button', { name: 'appApi.apiKeyModal.addKnowledgeBase' }),
+    )
+    await user.click(await screen.findByRole('checkbox', { name: 'Product guide' }))
+    expect(apiMocks.knowledgeBases).toHaveBeenCalledWith('/datasets?page=1')
+    await user.keyboard('{Escape}')
+    await user.click(within(scope).getByRole('button', { name: 'common.operation.cancel' }))
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: 'appApi.apiKeyModal.addTitle' }),
+      ).not.toBeInTheDocument(),
+    )
+    await user.click(openScope)
+    const reopened = screen.getByRole('dialog', { name: 'appApi.apiKeyModal.addTitle' })
+    expect(within(reopened).getByRole('radio', { name: /scopeAllDatasets/ })).toBeChecked()
+    await user.click(within(reopened).getByRole('radio', { name: /scopeSpecificDatasets/ }))
+    expect(
+      within(reopened).getByText('appApi.apiKeyModal.noKnowledgeBasesSelected'),
+    ).toBeInTheDocument()
+    expect(within(reopened).getByRole('button', { name: 'common.operation.create' })).toBeDisabled()
+  })
+
+  it('freezes scope while creating and retries the same selection after failure', async () => {
+    const pending = createPendingRequest<{ token: string }>()
+    apiMocks.createDataset.mockReturnValueOnce(pending.promise)
+    const { onOpenChange } = await renderModal(datasetScope)
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    await user.click(screen.getByRole('button', { name: 'appApi.apiKeyModal.createNewSecretKey' }))
+    const scope = screen.getByRole('dialog', { name: 'appApi.apiKeyModal.addTitle' })
+    await user.click(within(scope).getByRole('radio', { name: /scopeSpecificDatasets/ }))
+    await user.click(
+      within(scope).getByRole('button', { name: 'appApi.apiKeyModal.addKnowledgeBase' }),
+    )
+    await user.click(await screen.findByRole('checkbox', { name: 'Product guide' }))
+    await user.keyboard('{Escape}')
+    const create = within(scope).getByRole('button', { name: 'common.operation.create' })
+    await user.click(create)
+    await waitFor(() => expect(create).toHaveAttribute('aria-disabled', 'true'))
+    expect(within(scope).getByRole('radio', { name: /scopeAllDatasets/ })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    )
+    for (const name of [
+      'common.operation.remove',
+      'common.operation.close',
+      'common.operation.cancel',
+      'appApi.apiKeyModal.addKnowledgeBase',
+    ])
+      expect(within(scope).getByRole('button', { name })).toBeDisabled()
+    await user.keyboard('{Escape}')
+    await user.click(create)
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(apiMocks.createDataset).toHaveBeenCalledTimes(1)
+    await act(async () => pending.reject(new Error('Creation failed')))
+    await waitFor(() => expect(create).not.toHaveAttribute('aria-disabled', 'true'))
+    expect(within(scope).getByText('Product guide')).toBeInTheDocument()
+    await user.click(create)
+    await waitFor(() => expect(apiMocks.createDataset).toHaveBeenCalledTimes(2))
+    expect(apiMocks.createDataset).toHaveBeenNthCalledWith(2, { body: { dataset_ids: ['kb-1'] } })
+    expect(
+      await screen.findByRole('textbox', { name: 'appApi.apiKeyModal.secretKey' }),
+    ).toHaveValue('new-dataset-token-123')
+    await user.click(screen.getByRole('button', { name: 'appApi.actionMsg.ok' }))
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('textbox', { name: 'appApi.apiKeyModal.secretKey' }),
+      ).not.toBeInTheDocument(),
+    )
+    expect(
+      screen.getByRole('dialog', { name: 'appApi.apiKeyModal.apiSecretKey' }),
+    ).toBeInTheDocument()
   })
 })
