@@ -31,7 +31,7 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { IconPickerDialog } from '@/app/components/base/icon-picker'
 import LabelSelector from '@/app/components/tools/labels/selector'
-import ConfirmModal from '@/app/components/tools/workflow-tool/confirm-modal'
+import { ConfirmModal } from '@/app/components/tools/workflow-tool/confirm-modal'
 import MethodSelector from '@/app/components/tools/workflow-tool/method-selector'
 import { normalizeWorkflowOutputName } from '@/app/components/workflow/utils/variable'
 import { toast } from '@/app/notifications'
@@ -590,13 +590,11 @@ export function WorkflowToolDrawer({
         </form>
       </WorkflowToolDrawerFrame>
 
-      {confirmModalOpen && (
-        <ConfirmModal
-          show={confirmModalOpen}
-          onClose={() => setConfirmModalOpen(false)}
-          onConfirm={onConfirm}
-        />
-      )}
+      <ConfirmModal
+        open={confirmModalOpen}
+        onOpenChange={setConfirmModalOpen}
+        onConfirm={onConfirm}
+      />
     </>
   )
 }
