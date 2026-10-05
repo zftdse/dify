@@ -193,7 +193,7 @@ export function WebAppAccessCard({
         },
         body: sitePayload,
       })
-      await queryClient.invalidateQueries({ queryKey: agentDetailQueryKey }, { throwOnError: true })
+      void queryClient.invalidateQueries({ queryKey: agentDetailQueryKey })
       toast.success(tCommon(($) => $['actionMsg.modifiedSuccessfully']))
       return true
     } catch {

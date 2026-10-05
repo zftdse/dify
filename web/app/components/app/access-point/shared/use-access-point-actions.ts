@@ -29,16 +29,15 @@ export function useAccessPointActions(appId: string, canManageAccessPoint: boole
           params: { app_id: appId },
           body: params,
         })
-        const queryKey = consoleQuery.apps.byAppId.get.queryKey({
-          input: { params: { app_id: appId } },
+        void queryClient.invalidateQueries({
+          queryKey: consoleQuery.apps.byAppId.get.queryKey({
+            input: { params: { app_id: appId } },
+          }),
         })
-        await queryClient.cancelQueries({ queryKey })
-        const appDetail = await consoleClient.apps.byAppId.get({ params: { app_id: appId } })
-        queryClient.setQueryData(queryKey, appDetail)
-        if (useAppStore.getState().appDetail?.id === appId) setAppDetail(appDetail)
         void queryClient.invalidateQueries({ queryKey: consoleQuery.apps.get.key() })
         void queryClient.invalidateQueries({ queryKey: consoleQuery.apps.starred.get.key() })
         void queryClient.invalidateQueries({ queryKey: consoleQuery.apps.recent.get.key() })
+        void refreshAppDetail()
         toast(
           t(($) => $['actionMsg.modifiedSuccessfully'], { ns: 'common' }),
           { type: 'success' },
@@ -52,7 +51,7 @@ export function useAccessPointActions(appId: string, canManageAccessPoint: boole
         return false
       }
     },
-    [appId, canManageAccessPoint, queryClient, setAppDetail, t],
+    [appId, canManageAccessPoint, queryClient, refreshAppDetail, t],
   )
 
   return {

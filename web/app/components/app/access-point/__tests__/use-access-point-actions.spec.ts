@@ -84,92 +84,63 @@ describe('useAccessPointActions', () => {
 
   afterEach(() => useAppStore.getState().setAppDetail(undefined))
 
-  it('waits for full detail before committing the site to the store and query cache', async () => {
+  it('succeeds after POST while detail refresh continues in the background', async () => {
     const detail = deferredDetail()
     mocks.fetchAppDetail.mockReturnValueOnce(detail.promise)
     const updated = createAppDetailFixture({
       id: 'app-1',
-      site: createAppSiteFixture({
-        title: 'Saved portal',
-        chat_color_theme: '#123456',
-        icon_type: 'image',
-        icon_url: 'https://files.example.test/saved.png',
-      }),
+      site: createAppSiteFixture({ title: 'Saved portal' }),
     })
     const { queryClient, result } = renderActions()
     const previous = useAppStore.getState().appDetail
     queryClient.setQueryData(detailKey(), previous)
-    const invalidation = vi.spyOn(queryClient, 'invalidateQueries')
-    let settled = false
-    const save = result.current.saveSiteConfig(siteConfig).then((success) => {
-      settled = true
-      return success
-    })
-    await waitFor(() => expect(mocks.fetchAppDetail).toHaveBeenCalled())
-    expect(settled).toBe(false)
-    expect(useAppStore.getState().appDetail).toEqual(previous)
-    expect(queryClient.getQueryData(detailKey())).toEqual(previous)
-    await act(async () => detail.resolve(updated))
-    expect(await save).toBe(true)
+
+    expect(await result.current.saveSiteConfig(siteConfig)).toBe(true)
     expect(mocks.updateAppSiteConfig).toHaveBeenCalledWith({
       params: { app_id: 'app-1' },
       body: siteConfig,
     })
-    expect(useAppStore.getState().appDetail).toEqual(updated)
-    expect(queryClient.getQueryData(detailKey())).toEqual(updated)
-    for (const queryKey of [
-      consoleQuery.apps.get.key(),
-      consoleQuery.apps.starred.get.key(),
-      consoleQuery.apps.recent.get.key(),
-    ])
-      expect(invalidation).toHaveBeenCalledWith({ queryKey })
-    expect(mocks.toast).toHaveBeenCalledWith('common.actionMsg.modifiedSuccessfully', {
+    expect(mocks.fetchAppDetail).toHaveBeenCalledWith({ params: { app_id: 'app-1' } })
+    expect(useAppStore.getState().appDetail).toEqual(previous)
+    expect(queryClient.getQueryState(detailKey())?.isInvalidated).toBe(true)
+    expect(mocks.toast).toHaveBeenCalledExactlyOnceWith('common.actionMsg.modifiedSuccessfully', {
       type: 'success',
     })
+
+    await act(async () => detail.resolve(updated))
+    await waitFor(() => expect(useAppStore.getState().appDetail).toEqual(updated))
   })
 
-  it.each(['post', 'refresh'])(
-    'returns false and preserves the committed source when %s fails',
-    async (stage) => {
-      const { queryClient, result } = renderActions()
-      const previous = useAppStore.getState().appDetail
-      queryClient.setQueryData(detailKey(), previous)
-      if (stage === 'post')
-        mocks.updateAppSiteConfig.mockRejectedValueOnce(new Error('Save failed'))
-      else mocks.fetchAppDetail.mockRejectedValueOnce(new Error('Refresh failed'))
-      expect(await result.current.saveSiteConfig(siteConfig)).toBe(false)
-      expect(useAppStore.getState().appDetail).toEqual(previous)
-      expect(queryClient.getQueryData(detailKey())).toEqual(previous)
-      expect(mocks.toast).toHaveBeenCalledExactlyOnceWith(
-        'common.actionMsg.modifiedUnsuccessfully',
-        { type: 'error' },
-      )
-      if (stage === 'post') expect(mocks.fetchAppDetail).not.toHaveBeenCalled()
-      expect(await result.current.saveSiteConfig(siteConfig)).toBe(true)
-    },
-  )
+  it('returns false after POST failure and allows retrying without refreshing failed saves', async () => {
+    const { result } = renderActions()
+    const previous = useAppStore.getState().appDetail
+    mocks.updateAppSiteConfig.mockRejectedValueOnce(new Error('Save failed'))
 
-  it('updates the saved app cache without replacing another current app', async () => {
-    const detail = deferredDetail()
-    mocks.fetchAppDetail.mockReturnValueOnce(detail.promise)
-    const { queryClient, result } = renderActions()
-    const save = result.current.saveSiteConfig(siteConfig)
-    await waitFor(() => expect(mocks.fetchAppDetail).toHaveBeenCalled())
-    const nextApp = createAppDetailFixture({ id: 'app-2' })
-    act(() => useAppStore.getState().setAppDetail(nextApp))
-    const updated = createAppDetailFixture({
-      id: 'app-1',
-      site: createAppSiteFixture({
-        title: 'Saved portal',
-        chat_color_theme: '#123456',
-        icon_type: 'image',
-        icon_url: 'https://files.example.test/saved.png',
-      }),
+    expect(await result.current.saveSiteConfig(siteConfig)).toBe(false)
+    expect(useAppStore.getState().appDetail).toEqual(previous)
+    expect(mocks.fetchAppDetail).not.toHaveBeenCalled()
+    expect(mocks.toast).toHaveBeenCalledExactlyOnceWith('common.actionMsg.modifiedUnsuccessfully', {
+      type: 'error',
     })
-    await act(async () => detail.resolve(updated))
-    expect(await save).toBe(true)
-    expect(useAppStore.getState().appDetail).toEqual(nextApp)
-    expect(queryClient.getQueryData(detailKey())).toEqual(updated)
+    expect(await result.current.saveSiteConfig(siteConfig)).toBe(true)
+  })
+
+  it('keeps a successful save successful when the background detail refresh fails', async () => {
+    const { result } = renderActions()
+    const previous = useAppStore.getState().appDetail
+    const error = new Error('Refresh failed')
+    mocks.fetchAppDetail.mockRejectedValueOnce(error)
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(await result.current.saveSiteConfig(siteConfig)).toBe(true)
+    await waitFor(() =>
+      expect(errorLog).toHaveBeenCalledWith('Failed to refresh app detail:', error),
+    )
+    expect(useAppStore.getState().appDetail).toEqual(previous)
+    expect(mocks.toast).toHaveBeenCalledExactlyOnceWith('common.actionMsg.modifiedSuccessfully', {
+      type: 'success',
+    })
+    errorLog.mockRestore()
   })
 
   it('returns false without a request when management permission is denied', async () => {
