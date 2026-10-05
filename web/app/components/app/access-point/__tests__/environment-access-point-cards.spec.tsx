@@ -1,15 +1,19 @@
 import type { ReactElement } from 'react'
-import { QueryClientProvider } from '@tanstack/react-query'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { NuqsTestingAdapter } from 'nuqs/adapters/testing'
 import { toast } from '@/app/notifications'
+import { seedFeatures, seedSystemFeatures } from '@/test/console/query-data'
+import { QueryClientTestProvider } from '@/test/console/query-provider'
 import { render } from '@/test/console/render'
+import { createAppSiteFixture } from '@/test/fixtures/app'
 import { createTestQueryClient } from '@/test/query-client'
 import { EnvironmentServiceApiCard } from '../deployed-environment-access-points/environment-service-api-card'
 import { EnvironmentWebAppCard } from '../deployed-environment-access-points/environment-web-app-card'
 
 const mocks = vi.hoisted(() => ({
   getApi: vi.fn(),
+  saveSiteConfig: vi.fn(),
   getSite: vi.fn(),
   getSubjects: vi.fn(),
   resetSite: vi.fn(),
@@ -45,6 +49,7 @@ vi.mock('@/app/components/app/store', () => ({
         icon_type: 'emoji',
         icon_url: null,
         site: {
+          ...createAppSiteFixture(),
           access_token: 'built-in-code',
           app_base_url: 'https://built-in.example.test',
         },
@@ -58,13 +63,8 @@ vi.mock('@/app/components/base/app-icon', () => ({
 
 vi.mock('@/app/components/app/access-point/shared/use-access-point-actions', () => ({
   useAccessPointActions: () => ({
-    saveSiteConfig: vi.fn(),
+    saveSiteConfig: mocks.saveSiteConfig,
   }),
-}))
-
-vi.mock('@/app/components/app/overview/settings', () => ({
-  default: ({ isShow }: { isShow: boolean }) =>
-    isShow ? <div role="dialog" aria-label="environment settings" /> : null,
 }))
 
 vi.mock('../deployed-environment-access-points/environment-access-control', () => ({
@@ -122,13 +122,19 @@ const api = {
 }
 
 function renderCard(ui: ReactElement, queryClient = createTestQueryClient()) {
+  seedFeatures(queryClient)
+  seedSystemFeatures(queryClient)
   queryClient.setQueryData(['system-features'], {
     webapp_auth: {
       enabled: true,
     },
   })
 
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+  return render(
+    <NuqsTestingAdapter>
+      <QueryClientTestProvider queryClient={queryClient}>{ui}</QueryClientTestProvider>
+    </NuqsTestingAdapter>,
+  )
 }
 
 function createDeferredPromise<T>() {
@@ -148,6 +154,7 @@ afterAll(() => vi.unstubAllGlobals())
 describe('environment access point cards', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.saveSiteConfig.mockResolvedValue(true)
     mockAppMode = 'workflow'
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init)
@@ -408,7 +415,19 @@ describe('environment access point cards', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
 
     await user.click(screen.getByRole('button', { name: /settings\.settings/ }))
-    expect(screen.getByRole('dialog', { name: 'environment settings' })).toBeInTheDocument()
+    const settings = await screen.findByRole('dialog', {
+      name: 'appOverview.overview.appInfo.settings.title',
+    })
+    await user.clear(within(settings).getByPlaceholderText('app.appNamePlaceholder'))
+    await user.type(
+      within(settings).getByPlaceholderText('app.appNamePlaceholder'),
+      'Environment portal',
+    )
+    await user.click(within(settings).getByRole('button', { name: 'common.operation.save' }))
+    expect(mocks.saveSiteConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Environment portal' }),
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
   it('keeps view actions available while disabling deployed Web App management', async () => {
