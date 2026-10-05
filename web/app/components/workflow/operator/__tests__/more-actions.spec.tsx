@@ -50,21 +50,6 @@ vi.mock('@/utils/download', () => ({
   downloadUrl: (...args: unknown[]) => mockDownloadUrl(...args),
 }))
 
-vi.mock('../tip-popup', () => ({
-  default: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}))
-
-vi.mock('@/app/components/base/image-uploader/image-preview', () => ({
-  default: ({ title, onCancel }: { title: string; onCancel: () => void }) => (
-    <div data-testid="image-preview">
-      <span>{title}</span>
-      <button type="button" onClick={onCancel}>
-        close-preview
-      </button>
-    </div>
-  ),
-}))
-
 describe('MoreActions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -126,7 +111,7 @@ describe('MoreActions', () => {
       await vi.advanceTimersByTimeAsync(300)
     })
 
-    expect(screen.getByTestId('image-preview')).toHaveTextContent('Demo App-whole-workflow.png')
+    expect(screen.getByRole('dialog', { name: 'Demo App-whole-workflow.png' })).toBeInTheDocument()
     await act(async () => {
       await vi.runAllTimersAsync()
     })
@@ -173,7 +158,7 @@ describe('MoreActions', () => {
       await vi.runAllTimersAsync()
     })
     expect(mockSetViewport).toHaveBeenCalledTimes(2)
-    expect(screen.getByTestId('image-preview')).toHaveTextContent('Demo App-whole-workflow.svg')
+    expect(screen.getByRole('dialog', { name: 'Demo App-whole-workflow.svg' })).toBeInTheDocument()
   })
 
   it('returns early when there is no app or knowledge name', async () => {
@@ -229,16 +214,18 @@ describe('MoreActions', () => {
     await waitFor(() => {
       expect(consoleErrorSpy).toHaveBeenCalledWith('Export image failed:', expect.any(Error))
     })
-    expect(screen.queryByTestId('image-preview')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 
     mockToPng.mockResolvedValueOnce('data:image/png;base64,current')
     fireEvent.click(screen.getByRole('button'))
     fireEvent.click(screen.getAllByText('workflow.common.exportPNG')[1]!)
     await waitFor(() => {
-      expect(screen.getByTestId('image-preview')).toBeInTheDocument()
+      expect(
+        screen.getByRole('dialog', { name: 'Demo App-whole-workflow.png' }),
+      ).toBeInTheDocument()
     })
-    await user.click(screen.getByText('close-preview'))
-    expect(screen.queryByTestId('image-preview')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'common.operation.cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
 
     consoleErrorSpy.mockRestore()
   })
